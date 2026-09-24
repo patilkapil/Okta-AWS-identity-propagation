@@ -24,9 +24,32 @@ Okta is used in two separate ways:
 | **AWS IAM Identity Center** (from the Okta Integration Network, SAML + SCIM) | **Provisioning.** Okta pushes users and groups into IAM Identity Center so they exist on the AWS side. |
 | **OIDC Web App** (one you create) | **Authentication for this demo app.** Its client ID becomes the `aud` in the ID token. |
 
-The Okta OIDC app and the Identity Center "customer managed application" are linked only by
-two values you copy from Okta into AWS: the **issuer URL** and the **client ID (audience)**.
-`setup_aws.py` sets both.
+## How the two app registrations fit together
+
+Nothing federates or syncs between the Okta app and AWS, but you register the app twice, once on
+each side. A single value links the two registrations.
+
+**In Okta (your IdP)**, the app is an OIDC client. When a user logs in, Okta issues a JWT whose
+`aud` (audience) claim is that client's ID.
+
+**In IAM Identity Center**, a separate *customer managed application* represents the same app on the
+AWS side. You configure it with two things:
+
+- **which trusted token issuer to accept tokens from:** Okta's issuer URL
+- **which `aud` value to accept:** the Okta client ID
+
+That `aud` value is the entire link. There's no handshake, redirect, or protocol connection between
+the two apps. The Identity Center application just says: *"I'll accept JWTs signed by this issuer,
+meant for this audience."* When the app calls `CreateTokenWithIAM`, it names this Identity Center
+application, and Identity Center checks the incoming JWT against those rules.
+
+**One more piece of wiring:** the app's IAM role needs permission to call the token exchange
+(`sso-oauth:CreateTokenWithIAM`) against *that specific* Identity Center application. Otherwise any
+role could present JWTs to it.
+
+So the Okta app authenticates the user, and the Identity Center app decides whether to trust that
+authentication. The two only know about each other through the issuer URL and audience you copy
+from Okta into AWS.
 
 ## Files
 
@@ -75,9 +98,22 @@ cp .env.example .env        # fill in OKTA_*, AWS_REGION, S3_BUCKET, DEMO_USER_E
 python setup_aws.py         # prints APP_ROLE_ARN and IDC_APPLICATION_ARN
 ```
 
-Paste the two printed ARNs into `.env`. The script creates:
+Paste the two printed ARNs into `.env`.
 
-- **`OktaS3DemoAppRole`**: the role the app uses. Your local credentials assume it. It can call `CreateTokenWithIAM` and `GetDataAccess`, and its trust policy allows `sts:SetContext`.
+Setup checklist. These are the pieces the script wires up, following
+[How the two app registrations fit together](#how-the-two-app-registrations-fit-together):
+
+1. **Okta OIDC client** (Step 2): note the **issuer URL** and **client ID**.
+2. **Trusted token issuer** in IAM Identity Center: set to the Okta **issuer URL**.
+3. **Customer managed application** in IAM Identity Center: accepts JWTs from that trusted token
+   issuer whose `aud` equals the Okta **client ID**.
+4. **IAM role for the app**: allowed to call `sso-oauth:CreateTokenWithIAM` on that specific
+   application, and named in the application's actor policy.
+5. **S3 Access Grants**: grant the Identity Center user or group access to an S3 prefix.
+
+The script creates:
+
+- **`OktaS3DemoAppRole`**: the role the app uses. Your local credentials assume it. It can call `CreateTokenWithIAM` (only against the `okta-s3-demo` application) and `GetDataAccess`, and its trust policy allows `sts:SetContext`.
 - **Trusted token issuer**: the Okta issuer URL. Okta's `email` claim is matched to the Identity Center user's email.
 - **Customer managed application `okta-s3-demo`**:
   - *Grant:* JWT bearer tokens from that issuer with `aud` = your Okta client ID

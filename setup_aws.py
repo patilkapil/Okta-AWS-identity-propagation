@@ -105,8 +105,8 @@ app_role_arn, app_created = ensure_role(
         "Principal": {"AWS": f"arn:aws:iam::{ACCOUNT_ID}:root"},
         "Action": ["sts:AssumeRole", "sts:SetContext"],
     }]},
+    # CreateTokenWithIAM is added below, scoped to the Identity Center application once it exists.
     policy={"Version": "2012-10-17", "Statement": [
-        {"Effect": "Allow", "Action": "sso-oauth:CreateTokenWithIAM", "Resource": "*"},
         {"Effect": "Allow", "Action": "s3:GetDataAccess", "Resource": "*"},
     ]},
 )
@@ -188,6 +188,14 @@ sso_admin.put_application_authentication_method(
         }],
     }}},
 )
+# ...and the app role may call the token exchange only against this application.
+iam.put_role_policy(RoleName=APP_ROLE_NAME, PolicyName="demo", PolicyDocument=json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {"Effect": "Allow", "Action": "sso-oauth:CreateTokenWithIAM", "Resource": app_arn},
+        {"Effect": "Allow", "Action": "s3:GetDataAccess", "Resource": "*"},
+    ],
+}))
 # Tokens issued for this app may be used with S3 Access Grants.
 sso_admin.put_application_access_scope(ApplicationArn=app_arn, Scope="s3:access_grants:read_write")
 print("    grant (issuer + audience), actor policy and s3:access_grants scope configured")
