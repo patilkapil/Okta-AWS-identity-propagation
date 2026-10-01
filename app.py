@@ -44,8 +44,38 @@ def page(body):
     return f"""<!doctype html><html><head><title>Okta → S3 demo</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 16px;line-height:1.5}}
 pre{{background:#f4f4f4;padding:12px;overflow-x:auto;border-radius:6px}}
-.err{{color:#b00020}} input{{width:60%}}</style></head><body>
+.err{{color:#b00020}} input{{width:60%}}
+.jwt-raw{{word-break:break-all;font-family:monospace;font-size:13px;line-height:1.8}}
+.jwt-header{{color:#fb015b}}.jwt-payload{{color:#d63aff}}.jwt-sig{{color:#00b9f1}}
+.jwt-section{{margin-top:16px}}</style></head><body>
 <h2>Okta → IAM Identity Center → S3 Access Grants</h2>{body}</body></html>"""
+
+
+def jwt_view(token, title):
+    parts = token.split(".")
+    if len(parts) != 3:
+        return '<p class="err">Invalid JWT</p>'
+    header = tip.decode_jwt_part(parts[0])
+    payload = tip.decode_jwt_part(parts[1])
+    return f"""
+<h3>{html.escape(title)}</h3>
+<div class="jwt-raw">
+  <span class="jwt-header">{html.escape(parts[0])}</span>.<span
+        class="jwt-payload">{html.escape(parts[1])}</span>.<span
+        class="jwt-sig">{html.escape(parts[2])}</span>
+</div>
+<div class="jwt-section">
+  <b>Header</b>
+  <pre>{html.escape(json.dumps(header, indent=2))}</pre>
+</div>
+<div class="jwt-section">
+  <b>Payload</b>
+  <pre>{html.escape(json.dumps(payload, indent=2))}</pre>
+</div>
+<div class="jwt-section">
+  <b>Signature</b>
+  <pre>{html.escape(parts[2])}</pre>
+</div>"""
 
 
 @app.route("/")
@@ -126,7 +156,8 @@ this user simply has no S3 Access Grant covering <code>{html.escape(key)}</code>
 <h3>s3://{html.escape(BUCKET)}/{html.escape(key)}</h3>
 <pre>{html.escape(data.decode("utf-8", errors="replace"))}</pre>
 <h3>How the identity got here</h3>
-<pre>{html.escape(json.dumps(trace, indent=2, default=str))}</pre>""")
+<pre>{html.escape(json.dumps(trace, indent=2, default=str))}</pre>
+{jwt_view(session["id_token"], "ID Token (Okta)")}""")
 
 
 @app.route("/logout")

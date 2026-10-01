@@ -1,8 +1,12 @@
 """One-time AWS setup for the Okta -> S3 identity propagation demo.
 
-Prerequisites (see README): IAM Identity Center is enabled, and the demo user already
-exists in it (provisioned from Okta via SCIM). Safe to re-run: it reuses anything
-it already created.
+Prerequisites (see README): IAM Identity Center is enabled and Okta SSO (SCIM) is
+already configured. Also requires a trusted token issuer (TTI) already created in
+Identity Center pointing at your Okta issuer URL — set TTI_ARN in .env.
+
+This script creates: IAM roles, S3 bucket + demo files, Identity Center customer
+managed application, and S3 Access Grants. Safe to re-run: it reuses anything it
+already created.
 
 Run:  python setup_aws.py
 """
@@ -18,16 +22,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
-OKTA_ISSUER = os.environ["OKTA_ISSUER"].rstrip("/")
 OKTA_CLIENT_ID = os.environ["OKTA_CLIENT_ID"]
 BUCKET = os.environ["S3_BUCKET"]
 DEMO_USER_EMAIL = os.environ["DEMO_USER_EMAIL"]
+INSTANCE_ARN = os.environ["INSTANCE_ARN"]
+IDENTITY_STORE_ID = os.environ["IDENTITY_STORE_ID"]
+TTI_ARN = os.environ["TTI_ARN"]
 GRANT_PREFIX = "demo/*"
 DEMO_KEY = "demo/hello.txt"
 
 APP_ROLE_NAME = "OktaS3DemoAppRole"
 LOCATION_ROLE_NAME = "OktaS3DemoAccessGrantsLocationRole"
-TTI_NAME = "okta-s3-demo-issuer"
 IDC_APP_NAME = "okta-s3-demo"
 
 iam = boto3.client("iam")
@@ -55,15 +60,7 @@ def ensure_role(name, trust, policy):
     return arn, created
 
 
-# --- IAM Identity Center instance -------------------------------------------------
-step("Finding IAM Identity Center instance")
-instances = sso_admin.list_instances()["Instances"]
-if not instances:
-    raise SystemExit(f"IAM Identity Center is not enabled in {REGION}. Enable it first (see README).")
-INSTANCE_ARN = instances[0]["InstanceArn"]
-IDENTITY_STORE_ID = instances[0]["IdentityStoreId"]
-print(f"    {INSTANCE_ARN} (identity store {IDENTITY_STORE_ID})")
-
+# --- Identity Center user lookup --------------------------------------------------
 step(f"Looking up Identity Center user {DEMO_USER_EMAIL}")
 user_id = None
 for path in ("emails.value", "userName"):
@@ -95,17 +92,18 @@ s3.put_object(Bucket=BUCKET, Key="private/secret.txt",
               Body=b"Nobody has a grant for this prefix, so this should always be denied.\n")
 
 # --- IAM roles --------------------------------------------------------------------
+# Create with a placeholder policy first; the app role policy is tightened below
+# once we know the IDC application ARN.
 step("Creating IAM roles")
 app_role_arn, app_created = ensure_role(
     APP_ROLE_NAME,
-    # Your local AWS credentials assume this role. sts:SetContext is what lets the
-    # app attach the Identity Center identity context to the role session.
+    # Your local AWS credentials assume this role. sts:SetContext lets the app
+    # attach the Identity Center identity context to the role session.
     trust={"Version": "2012-10-17", "Statement": [{
         "Effect": "Allow",
         "Principal": {"AWS": f"arn:aws:iam::{ACCOUNT_ID}:root"},
         "Action": ["sts:AssumeRole", "sts:SetContext"],
     }]},
-    # CreateTokenWithIAM is added below, scoped to the Identity Center application once it exists.
     policy={"Version": "2012-10-17", "Statement": [
         {"Effect": "Allow", "Action": "s3:GetDataAccess", "Resource": "*"},
     ]},
@@ -128,27 +126,7 @@ if app_created or loc_created:
     print("    waiting 15s for IAM to propagate...")
     time.sleep(15)
 
-# --- Trusted token issuer (points at Okta) ----------------------------------------
-step(f"Creating trusted token issuer for {OKTA_ISSUER}")
-tti_arn = next((t["TrustedTokenIssuerArn"] for t in
-                sso_admin.list_trusted_token_issuers(InstanceArn=INSTANCE_ARN)["TrustedTokenIssuers"]
-                if t["Name"] == TTI_NAME), None)
-if not tti_arn:
-    tti_arn = sso_admin.create_trusted_token_issuer(
-        InstanceArn=INSTANCE_ARN,
-        Name=TTI_NAME,
-        TrustedTokenIssuerType="OIDC_JWT",
-        TrustedTokenIssuerConfiguration={"OidcJwtConfiguration": {
-            "IssuerUrl": OKTA_ISSUER,
-            # Okta's `email` claim is matched against the Identity Center user's email.
-            "ClaimAttributePath": "email",
-            "IdentityStoreAttributePath": "emails.value",
-            "JwksRetrievalOption": "OPEN_ID_DISCOVERY",
-        }},
-    )["TrustedTokenIssuerArn"]
-print(f"    {tti_arn}")
-
-# --- Customer managed application (the AWS-side twin of the Okta app) -------------
+# --- Identity Center customer managed application ---------------------------------
 step("Creating Identity Center customer managed application")
 app_arn = next((a["ApplicationArn"] for a in
                 sso_admin.list_applications(InstanceArn=INSTANCE_ARN)["Applications"]
@@ -165,13 +143,12 @@ print(f"    {app_arn}")
 
 sso_admin.put_application_assignment_configuration(ApplicationArn=app_arn, AssignmentRequired=False)
 
-# This is the link between the two apps: accept JWTs from the Okta issuer whose
-# `aud` is the Okta app's client ID.
+# Accept JWTs from the Okta issuer whose `aud` is the Okta app's client ID.
 sso_admin.put_application_grant(
     ApplicationArn=app_arn,
     GrantType="urn:ietf:params:oauth:grant-type:jwt-bearer",
     Grant={"JwtBearer": {"AuthorizedTokenIssuers": [
-        {"TrustedTokenIssuerArn": tti_arn, "AuthorizedAudiences": [OKTA_CLIENT_ID]}
+        {"TrustedTokenIssuerArn": TTI_ARN, "AuthorizedAudiences": [OKTA_CLIENT_ID]}
     ]}},
 )
 # Only the app role may present tokens to this application.
@@ -188,7 +165,11 @@ sso_admin.put_application_authentication_method(
         }],
     }}},
 )
-# ...and the app role may call the token exchange only against this application.
+# Tokens issued for this app may be used with S3 Access Grants.
+sso_admin.put_application_access_scope(ApplicationArn=app_arn, Scope="s3:access_grants:read_write")
+print("    grant (issuer + audience), actor policy and s3:access_grants scope configured")
+
+# Tighten the app role policy now that we know the application ARN.
 iam.put_role_policy(RoleName=APP_ROLE_NAME, PolicyName="demo", PolicyDocument=json.dumps({
     "Version": "2012-10-17",
     "Statement": [
@@ -196,9 +177,6 @@ iam.put_role_policy(RoleName=APP_ROLE_NAME, PolicyName="demo", PolicyDocument=js
         {"Effect": "Allow", "Action": "s3:GetDataAccess", "Resource": "*"},
     ],
 }))
-# Tokens issued for this app may be used with S3 Access Grants.
-sso_admin.put_application_access_scope(ApplicationArn=app_arn, Scope="s3:access_grants:read_write")
-print("    grant (issuer + audience), actor policy and s3:access_grants scope configured")
 
 # --- S3 Access Grants -------------------------------------------------------------
 step("Configuring S3 Access Grants")

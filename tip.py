@@ -24,11 +24,15 @@ JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 IDENTITY_CENTER_CONTEXT_PROVIDER = "arn:aws:iam::aws:contextProvider/IdentityCenter"
 
 
+def decode_jwt_part(part):
+    """Decode a single base64url-encoded JWT part (header or payload)."""
+    part += "=" * (-len(part) % 4)
+    return json.loads(base64.urlsafe_b64decode(part))
+
+
 def decode_jwt(token):
     """Return a JWT's claims without verifying it. For display only; AWS does the real verification."""
-    payload = token.split(".")[1]
-    payload += "=" * (-len(payload) % 4)
-    return json.loads(base64.urlsafe_b64decode(payload))
+    return decode_jwt_part(token.split(".")[1])
 
 
 def _session_from(creds):
