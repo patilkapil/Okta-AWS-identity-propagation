@@ -57,7 +57,7 @@ from Okta into AWS.
 |---|---|
 | `app.py` | Flask app: Okta login (auth code + PKCE) and a "fetch file" page that shows each hop |
 | `tip.py` | The 4 AWS calls above, one function each |
-| `setup_aws.py` | One-time AWS setup: IAM roles, trusted token issuer, Identity Center app, S3 Access Grants, demo bucket |
+| `setup_aws.py` | One-time AWS setup: IAM roles, Identity Center customer managed application, S3 Access Grants, demo bucket |
 | `.env.example` | All configuration |
 
 ## Prerequisites
@@ -89,22 +89,35 @@ from Okta into AWS.
    `https://<your-org>.okta.com/oauth2/default` (**Security → API → Authorization Servers**).
    Make sure that server's access policy allows this app. The "Default Policy" for "All clients" does.
 
-## Step 3: Configure and run the AWS setup
+## Step 3: Create a trusted token issuer in IAM Identity Center
+
+`setup_aws.py` requires a trusted token issuer (TTI) to already exist — it reads its ARN from `TTI_ARN` in `.env` rather than creating one, so that re-runs don't touch this sensitive config.
+
+1. In the AWS console, go to **IAM Identity Center → Settings → Trusted token issuers → Create**.
+2. **Issuer URL:** your Okta issuer (e.g. `https://<your-org>.okta.com/oauth2/default`).
+3. **Claim attribute path:** `email`. **Identity store attribute path:** `emails.value`. **JWKS retrieval:** `OPEN_ID_DISCOVERY`.
+4. Copy the **Trusted token issuer ARN** — you'll put it in `TTI_ARN` in the next step.
+
+## Step 4: Configure and run the AWS setup
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # fill in OKTA_*, AWS_REGION, S3_BUCKET, DEMO_USER_EMAIL
+cp .env.example .env        # fill in OKTA_*, AWS credentials, AWS_REGION, S3_BUCKET,
+                            # DEMO_USER_EMAIL, INSTANCE_ARN, IDENTITY_STORE_ID, TTI_ARN
 python setup_aws.py         # prints APP_ROLE_ARN and IDC_APPLICATION_ARN
 ```
 
-Paste the two printed ARNs into `.env`.
+`INSTANCE_ARN` and `IDENTITY_STORE_ID` are on the **IAM Identity Center → Settings** page.
+`TTI_ARN` is the ARN you copied in Step 3.
 
-Setup checklist. These are the pieces the script wires up, following
+Paste the two printed ARNs (`APP_ROLE_ARN`, `IDC_APPLICATION_ARN`) into `.env`.
+
+Setup checklist. These are the pieces that must be in place, following
 [How the two app registrations fit together](#how-the-two-app-registrations-fit-together):
 
 1. **Okta OIDC client** (Step 2): note the **issuer URL** and **client ID**.
-2. **Trusted token issuer** in IAM Identity Center: set to the Okta **issuer URL**.
+2. **Trusted token issuer** in IAM Identity Center (Step 3): points at the Okta **issuer URL**.
 3. **Customer managed application** in IAM Identity Center: accepts JWTs from that trusted token
    issuer whose `aud` equals the Okta **client ID**.
 4. **IAM role for the app**: allowed to call `sso-oauth:CreateTokenWithIAM` on that specific
@@ -114,7 +127,6 @@ Setup checklist. These are the pieces the script wires up, following
 The script creates:
 
 - **`OktaS3DemoAppRole`**: the role the app uses. Your local credentials assume it. It can call `CreateTokenWithIAM` (only against the `okta-s3-demo` application) and `GetDataAccess`, and its trust policy allows `sts:SetContext`.
-- **Trusted token issuer**: the Okta issuer URL. Okta's `email` claim is matched to the Identity Center user's email.
 - **Customer managed application `okta-s3-demo`**:
   - *Grant:* JWT bearer tokens from that issuer with `aud` = your Okta client ID
   - *Actor policy:* only `OktaS3DemoAppRole` may call `CreateTokenWithIAM` against it
@@ -122,7 +134,7 @@ The script creates:
 - **S3 Access Grants**: an instance linked to Identity Center, a location for `s3://<bucket>/` (backed by `OktaS3DemoAccessGrantsLocationRole`), and **one grant: `DEMO_USER_EMAIL` → READ `demo/*`**.
 - **Bucket** with `demo/hello.txt` (granted) and `private/secret.txt` (not granted).
 
-## Step 4: Run the demo
+## Step 5: Run the demo
 
 ```bash
 python app.py
@@ -150,7 +162,7 @@ Open http://localhost:5000, then:
 ## Cleanup
 
 In the AWS console: delete the access grant, location and Access Grants instance (S3 → Access Grants);
-delete the `okta-s3-demo` application and `okta-s3-demo-issuer` trusted token issuer (IAM Identity Center);
+delete the `okta-s3-demo` application and the trusted token issuer you created in Step 3 (IAM Identity Center → Settings → Trusted token issuers);
 delete both `OktaS3Demo*` IAM roles; empty and delete the bucket.
 
 ## Not production-ready
